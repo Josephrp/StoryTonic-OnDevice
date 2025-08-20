@@ -1,0 +1,445 @@
+---
+description: "Android Storyteller App using Liquid AI Leap SDK with LFM2 model for creative long-form story generation through iterative prompting"
+globs: ["*.kt", "*.java", "*.xml", "*.gradle", "*.md"]
+alwaysApply: true
+---
+
+# Android Storyteller Application - Project Rules
+
+## Project Overview
+Android storyteller app using Liquid AI Leap SDK with LFM2 model for creative long-form story generation through iterative prompting and XML-structured responses.
+
+### Core Architecture
+1. **Story Generation Flow**:
+   - User provides a simple story prompt (e.g., "A cat in a hat goes to Neverland")
+   - **Step 1**: Generate story outline with characters, settings, plot, and conclusion
+   - **Step 2**: Parse XML-structured outline for structured information
+   - **Step 3**: Iteratively generate story sections (remove last section and generate next)
+   - **Step 4**: Return complete long-form story with all components
+   - Leverage LFM2 creativity through focused XML-formatted prompting
+
+2. **XML Structure**:
+```xml
+<story>
+    <characters>
+        <character name="Cat in Hat" role="protagonist" traits="adventurous,mysterious,playful"/>
+    </characters>
+    <settings>
+        <setting id="1" name="Cozy Bedroom" time="night" mood="peaceful"/>
+        <setting id="2" name="Magical Forest" time="twilight" mood="mysterious"/>
+    </settings>
+    <plot>
+        <problem>Getting lost on the way to Neverland</problem>
+        <twists>
+            <twist setting="2">Meeting a wise old owl who offers guidance</twist>
+        </twists>
+    </plot>
+    <conclusion>Returning home with magical memories and new friends</conclusion>
+</story>
+```
+
+### Technical Stack
+- **SDK**: `ai.liquid.leap:leap-sdk:0.4.0`
+- **Android API**: 31+ (ARM64 required)
+- **Kotlin**: 1.9.0+
+- **Java**: 11+
+- **Model**: LFM2 (Liquid Foundation Model 2)
+- **Architecture**: ARM64-v8a (physical devices only, no simulators)
+
+### Leap SDK Integration
+- **SDK**: `ai.liquid.leap:leap-sdk:0.4.0` with Gson and Model Downloader
+- **Model Loading**: `LeapClient.loadModel()` suspend function for .leap bundles
+- **Conversation Management**: `modelRunner.createConversation()` for chat sessions
+- **Streaming Generation**: `MessageResponse.Chunk` for real-time text generation
+- **Error Handling**: `LeapModelLoadingException` for model loading failures
+- **Requirements**: ARM64 devices with 3GB+ RAM (physical devices only)
+
+### Response Strategy
+- **Parser**: Android's XmlPullParser for efficient XML processing
+- **Prompt Engineering**: XML-formatted prompts for structured story generation
+- **Streaming**: Real-time text generation with chunked responses
+
+## Leap SDK Best Practices
+
+### Prerequisites & Setup
+```kotlin
+android {
+    defaultConfig {
+        minSdk = 31
+        targetSdk = 36
+    }
+}
+
+dependencies {
+    implementation("ai.liquid.leap:leap-sdk:0.4.0")
+    implementation("ai.liquid.leap:leap-gson:0.4.0")
+    implementation("ai.liquid.leap:leap-model-downloader:0.4.0")
+}
+```
+
+### Model Management
+```kotlin
+// Load model with error handling
+lifecycleScope.launch {
+    try {
+        val modelRunner = LeapClient.loadModel("/data/local/tmp/leap/model.leap")
+        // Use modelRunner for generation
+    } catch (e: LeapModelLoadingException) {
+        Log.e(TAG, "Failed to load model: ${e.message}")
+    }
+}
+```
+
+### Conversation & Generation
+```kotlin
+// Create conversation and handle streaming responses
+val conversation = modelRunner.createConversation()
+val generationJob = lifecycleScope.launch {
+    conversation.generateResponse(prompt)
+        .onEach { messageResponse ->
+            when (messageResponse) {
+                is MessageResponse.Chunk -> {
+                    // Handle text chunks in real-time
+                    val chunkText = messageResponse.text
+                }
+            }
+        }
+        .onCompletion { /* Generation completed */ }
+        .catch { exception -> /* Handle errors */ }
+        .collect()
+}
+
+// Cancel generation: generationJob.cancel()
+```
+
+### Model Bundle Management
+```bash
+# Transfer model to device
+adb shell mkdir -p /data/local/tmp/leap/
+adb push model.leap /data/local/tmp/leap/model.leap
+adb shell ls -la /data/local/tmp/leap/
+```
+
+### Key Requirements
+- **Physical ARM64 device** (simulators not supported)
+- **3GB+ RAM** for model execution
+- **Android API 31+** minimum requirement
+- **Model files**: 1-7GB .leap bundles from Leap Model Library
+
+## Best Practices
+
+### Kotlin Standards
+```kotlin
+// ✅ Data classes for models
+data class StoryCharacter(val name: String, val role: String, val traits: List<String>)
+
+// ✅ Sealed classes for states
+sealed class StoryGenerationResult {
+    data class Success(val story: Story) : StoryGenerationResult()
+    data class Error(val message: String) : StoryGenerationResult()
+    object Loading : StoryGenerationResult()
+}
+
+// ✅ Extension functions
+fun List<StoryCharacter>.getProtagonist() = firstOrNull { it.role == "protagonist" }
+
+// ❌ Avoid nested callbacks - use coroutines
+suspend fun generateStory(prompt: String): StoryGenerationResult = withContext(Dispatchers.IO) {
+    try {
+        // Load model and create conversation
+        val modelRunner = LeapClient.loadModel("/data/local/tmp/leap/model.bundle")
+        val conversation = modelRunner.createConversation()
+
+        // Generate response with streaming
+        val fullResponse = StringBuilder()
+        conversation.generateResponse(prompt).collect { messageResponse ->
+            when (messageResponse) {
+                is MessageResponse.Chunk -> {
+                    fullResponse.append(messageResponse.text)
+                }
+            }
+        }
+
+        // Parse and return result
+        StoryGenerationResult.Success(parseStoryResponse(fullResponse.toString()))
+    } catch (e: Exception) {
+        StoryGenerationResult.Error(e.message ?: "Unknown error")
+    }
+}
+```
+
+### State Management
+- Use `StateFlow` and `SharedFlow` for reactive data streams
+- Implement `ViewModel` with `SavedStateHandle` for configuration changes
+- Apply state hoisting for composable reusability
+- Use `Flow` operators for complex transformations
+
+### Java Interoperability
+```kotlin
+// ✅ Java-friendly APIs
+class StoryGenerator {
+    companion object {
+        @JvmStatic
+        fun createDefault() = StoryGenerator()
+    }
+
+    @JvmOverloads
+    fun generateStory(prompt: String, options: StoryOptions = StoryOptions.default()) =
+        CompletableFuture<Story>() // Implementation
+}
+```
+
+```java
+// ✅ Defensive copying for collections
+public class StoryService {
+    private final List<String> prompts;
+
+    public StoryService(@NonNull List<String> prompts) {
+        this.prompts = new ArrayList<>(prompts); // Defensive copy
+    }
+}
+```
+
+### XML Processing
+```kotlin
+// ✅ Efficient XML parsing with streaming
+class XmlStoryParser : StoryParser {
+    override fun parseStoryResponse(xmlContent: String): Story {
+        val parser = XmlPullParser().apply { setInput(StringReader(xmlContent)) }
+        val characters = mutableListOf<StoryCharacter>()
+        val settings = mutableListOf<StorySetting>()
+
+        var eventType = parser.eventType
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            if (eventType == XmlPullParser.START_TAG) {
+                when (parser.name) {
+                    "character" -> characters.add(parseCharacter(parser))
+                    "setting" -> settings.add(parseSetting(parser))
+                }
+            }
+            eventType = parser.next()
+        }
+        return Story(characters, settings)
+    }
+}
+```
+
+- **Validation**: Check XML structure before parsing
+- **Error Recovery**: Fallback strategies for malformed content
+- **Logging**: Context-aware error logging for debugging
+
+## File Organization
+
+### Package Structure
+```
+ai.liquid.leapchat/
+├── models/                  # Data models (Story, Character, Setting, Plot)
+├── services/                # Business logic services
+│   ├── StoryGenerationService.kt  # Main story generation logic
+│   └── StoryXmlParser.kt         # XML parsing for story responses
+├── views/                   # UI components
+│   ├── StoryDisplay.kt           # Story presentation component
+│   ├── AssistantMessage.kt       # Legacy chat components (can be removed)
+│   ├── ChatHistory.kt            # Legacy chat components (can be removed)
+│   ├── ToolMessage.kt            # Legacy chat components (can be removed)
+│   └── UserMessage.kt            # Legacy chat components (can be removed)
+└── MainActivity.kt               # Main app entry point
+```
+
+### Resource Organization
+```
+res/
+├── drawable/                # Icons and graphics
+├── mipmap/                  # App icons
+├── values/                  # Strings, colors, styles, themes
+├── xml/                     # XML configurations
+└── raw/                     # Raw assets (model files)
+```
+
+## Development Workflow
+
+### Git Strategy
+- **Branches**: `feature/story-generation`, `bugfix/parsing-error`
+- **Commits**: Conventional format (feat:, fix:, docs:, etc.)
+- **PRs**: Code review + CI checks required
+- **Releases**: Semantic versioning (v1.0.0)
+
+### Testing Strategy
+
+#### Unit Testing with Mocks
+```kotlin
+@Test
+fun `story generation with mocked Leap SDK`() = runTest {
+    val mockModelRunner = mockk<ai.liquid.leap.Model>()
+    val mockConversation = mockk<ai.liquid.leap.Conversation>()
+
+    every { mockModelRunner.createConversation() } returns mockConversation
+    coEvery { mockConversation.generateResponse(any()) } returns flow {
+        emit(MessageResponse.Chunk("Mock response"))
+        emit(MessageResponse.Complete)
+    }
+
+    val service = StoryGenerationService(mockModelRunner, xmlParser)
+    val result = service.generateCompleteStory("test prompt")
+
+    assertTrue(result is StoryGenerationResult.Success)
+}
+```
+
+#### Integration Testing
+```kotlin
+@Test
+fun `end-to-end story generation with real model`() = runTest {
+    // Requires physical device with model installed
+    val modelRunner = LeapClient.loadModel("/data/local/tmp/leap/model.leap")
+    val service = StoryGenerationService(modelRunner, xmlParser)
+
+    val result = service.generateCompleteStory("A cat in a hat goes to Neverland")
+    assertTrue(result is StoryGenerationResult.Success)
+
+    val story = (result as StoryGenerationResult.Success).story
+    assertTrue(story.characters.isNotEmpty())
+    assertTrue(story.fullText.isNotBlank())
+}
+```
+
+## Performance & Security
+
+### Performance Optimization
+- **Memory**: Proper ViewModel lifecycle, Flow buffering for streaming responses
+- **Leap SDK**: Model preloading, conversation reuse, chunked streaming
+- **Device**: ARM64 optimization, memory management for large models (1-7GB)
+
+### Security Guidelines
+- **Input Validation**: Sanitize user inputs and XML content
+- **Leap SDK**: Model file integrity, secure model storage, conversation isolation
+- **Device**: Secure storage access, model file permissions
+
+### Accessibility & i18n
+- **Accessibility**: Content descriptions, TalkBack support, color contrast
+- **Localization**: String resources for multiple languages
+
+---
+
+## Kotlin & Java Best Practices
+
+### Kotlin Essentials
+```kotlin
+// ✅ Null Safety
+val title = story?.title ?: "Default Title"
+
+// ✅ Data Classes & Sealed Classes
+data class StoryPrompt(val theme: String, val characters: List<String>, val setting: String)
+sealed class StoryResult {
+    data class Success(val story: Story) : StoryResult()
+    data class Error(val message: String) : StoryResult()
+}
+
+// ✅ Coroutines & Flow
+suspend fun generateStory(prompt: String) = coroutineScope {
+    val characters = async { generateCharacters(prompt) }
+    val settings = async { generateSettings(prompt) }
+    createStory(characters.await(), settings.await())
+}
+
+fun observeStoryGeneration() = flow {
+    emit(StoryResult.Loading)
+    emit(generateStory(prompt))
+}.catch { emit(StoryResult.Error(it.message ?: "Error")) }
+```
+
+### Java Interoperability
+```kotlin
+// ✅ Java-friendly APIs
+class StoryGenerator {
+    companion object {
+        @JvmStatic fun createDefault() = StoryGenerator()
+    }
+
+    @JvmOverloads
+    fun generateStory(prompt: String, options: StoryOptions = StoryOptions.default()) =
+        CompletableFuture<Story>() // Implementation
+}
+```
+
+```java
+// ✅ Defensive copying
+public class StoryService {
+    private final List<String> elements;
+
+    public StoryService(@NonNull List<String> elements) {
+        this.elements = new ArrayList<>(elements);
+    }
+}
+```
+
+### Performance Patterns
+```kotlin
+// ✅ Efficient XML parsing
+class XmlParser {
+    fun parse(xmlContent: String) = flow {
+        val parser = XmlPullParser().apply { setInput(StringReader(xmlContent)) }
+        var eventType = parser.eventType
+        while (eventType != END_DOCUMENT) {
+            if (eventType == START_TAG) emit(parseElement(parser))
+            eventType = parser.next()
+        }
+    }
+}
+
+// ✅ Memory-efficient string handling
+val story = sections.joinToString("\n") { it.content }
+```
+
+### Error Handling & Testing
+
+#### Leap SDK Error Patterns
+```kotlin
+// Custom exceptions for Leap SDK
+sealed class StoryException(message: String, cause: Throwable? = null) : Exception(message, cause) {
+    class ModelLoadingException(message: String, cause: Throwable? = null) : StoryException(message, cause)
+    class GenerationException(message: String, cause: Throwable? = null) : StoryException(message, cause)
+}
+
+// Error handling wrapper
+suspend fun generateWithErrorHandling(
+    modelRunner: ai.liquid.leap.Model,
+    prompt: String
+): Result<String> = runCatching {
+    try {
+        val conversation = modelRunner.createConversation()
+        val responseBuilder = StringBuilder()
+
+        conversation.generateResponse(prompt).collect { messageResponse ->
+            when (messageResponse) {
+                is MessageResponse.Chunk -> {
+                    responseBuilder.append(messageResponse.text)
+                }
+            }
+        }
+        responseBuilder.toString()
+    } catch (e: LeapModelLoadingException) {
+        throw StoryException.ModelLoadingException("Failed to load model: ${e.message}", e)
+    } catch (e: Exception) {
+        throw StoryException.GenerationException("Generation failed: ${e.message}", e)
+    }
+}
+```
+
+#### Testing with Leap SDK
+```kotlin
+@Test fun `story generation with Leap SDK`() = runTest {
+    val mockModelRunner = mockk<ai.liquid.leap.Model>()
+    val mockConversation = mockk<ai.liquid.leap.Conversation>()
+
+    every { mockModelRunner.createConversation() } returns mockConversation
+    coEvery { mockConversation.generateResponse(any()) } returns flow {
+        emit(MessageResponse.Chunk("Mock response"))
+    }
+
+    val service = StoryGenerationService(mockModelRunner, xmlParser)
+    val result = service.generateCompleteStory("test prompt")
+
+    assertTrue(result is StoryGenerationResult.Success)
+}
+```

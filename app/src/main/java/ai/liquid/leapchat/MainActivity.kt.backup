@@ -1,0 +1,372 @@
+package ai.liquid.leapchat
+
+import ai.liquid.leap.Leap
+import ai.liquid.leap.LeapModelLoadingException
+import ai.liquid.leapchat.models.Story
+import ai.liquid.leapchat.models.StoryGenerationResult
+import ai.liquid.leapchat.services.StoryGenerationService
+import ai.liquid.leapchat.services.StoryXmlParser
+import ai.liquid.leapchat.views.StoryDisplay
+import android.os.Bundle
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBarDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+
+class MainActivity : ComponentActivity() {
+    private val TAG = "MainActivity"
+    private val BUNDLED_MODEL_ASSET_NAME = "your_bundled_model.leap"
+
+    // The generation job instance
+    private var job: Job? = null
+
+    // The model instance
+    private val model: MutableLiveData<ai.liquid.leap.Model> by lazy {
+        MutableLiveData<ai.liquid.leap.Model>()
+    }
+
+    // Current story state
+    private val currentStory: MutableLiveData<Story?> by lazy {
+        MutableLiveData<Story?>()
+    }
+
+    // Whether generation is ongoing
+    private val isGeneratingStory: MutableLiveData<Boolean> by lazy {
+        MutableLiveData<Boolean>(false)
+    }
+
+    // Story generation service
+    private lateinit var storyGenerationService: StoryGenerationService
+    private val xmlParser = StoryXmlParser()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        // Init Leap SDK
+        Leap.init(applicationContext)
+
+        setContent { MainContent() }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        job?.cancel()
+    }
+
+    /**
+     * Helper function to copy a file from assets to a cache directory.
+     * Returns the File object of the copied file or null on failure.
+     */
+    private suspend fun copyAssetToCache(assetName: String, cacheFileName: String): File? = withContext(Dispatchers.IO) {
+        try {
+            val cacheFile = File(cacheDir, cacheFileName)
+            if (cacheFile.exists()) {
+                // Optional: decide if you want to overwrite or use existing
+                // For a model, usually, it's fine to use existing if it's the same version
+                Log.d(TAG, "Model file already exists in cache: ${cacheFile.absolutePath}")
+                return@withContext cacheFile
+            }
+            assets.open(assetName).use { inputStream ->
+                FileOutputStream(cacheFile).use { outputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+            }
+            Log.d(TAG, "Copied model from assets to: ${cacheFile.absolutePath}")
+            return@withContext cacheFile
+        } catch (e: IOException) {
+            Log.e(TAG, "Error copying asset $assetName to cache", e)
+            return@withContext null
+        }
+    }
+
+
+    /**
+     * The composable of the main activity content
+     */
+    @Composable
+    fun MainContent() {
+        val modelInstance by model.observeAsState()
+        val story by currentStory.observeAsState()
+        val isGenerating by isGeneratingStory.observeAsState(false)
+        var storyPrompt by remember { mutableStateOf("") }
+        val context = LocalContext.current
+
+        Scaffold(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(
+                    NavigationBarDefaults.windowInsets.union(
+                        WindowInsets.ime
+                    )
+                ),
+            topBar = {
+                if (modelInstance == null) {
+                    ModelLoadingIndicator(modelInstance) { onError, onStatusChange ->
+                        loadBundledModel(onError, onStatusChange)
+                    }
+                }
+            },
+            bottomBar = {
+                if (modelInstance != null) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        TextField(
+                            value = storyPrompt,
+                            onValueChange = { storyPrompt = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isGenerating,
+                            placeholder = { Text("Enter story prompt (e.g., 'A cat in a hat goes to Neverland')") },
+                            singleLine = true
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Button(
+                                onClick = {
+                                    job?.cancel()
+                                    isGeneratingStory.value = false
+                                },
+                                enabled = isGenerating
+                            ) {
+                                Text("Stop")
+                            }
+                                Button(
+                                    onClick = {
+                                        isInGeneration.value = true
+                                        if (imageUri != null) {
+                                            val currentContext = this@MainActivity
+                                            lifecycleScope.launch {
+                                                val imagePath = getFilePathFromUri(currentContext, imageUri!!)
+                                                if (imagePath != null) {
+                                                    val prompt = userInputFieldText.ifBlank { "Analyze this Android UI screenshot and provide control instructions." }
+                                                    appendUserMessage("Image + Prompt: $prompt") // Show image and prompt
+                                                    try {
+                                                        val response = generateControlInstructions(prompt, imagePath)
+                                                        appendAssistantMessage(response)
+                                                    } catch (e: Exception) {
+                                                        Log.e(TAG, "Error generating control instructions", e)
+                                                        appendAssistantMessage("Error: ${e.message}")
+                                                    } finally {
+                                                        imageUri = null // Clear image after sending
+                                                    }
+                                                } else {
+                                                    appendAssistantMessage("Error: Could not process image.")
+                                                }
+                                                userInputFieldText = ""
+                                                isInGeneration.value = false
+                                                chatHistoryFocusRequester.requestFocus()
+                                            }
+                                        } else {
+                                            // Existing text send logic (WILL LIKELY BREAK OR NEED ADAPTATION)
+                                            // sendText(userInputFieldText)
+                                            Log.w(TAG, "Text-only sendText needs adaptation for the new model API.")
+                                            appendUserMessage(userInputFieldText) // basic echo for now
+                                            appendAssistantMessage("Text-only chat needs update for new model.")
+                                            userInputFieldText = ""
+                                            isInGeneration.value = false // Reset generation state
+                                        }
+                                    },
+                                    enabled = !currentIsInGeneration && (userInputFieldText.isNotBlank() || imageUri != null)
+                                ) {
+                                    Text(getString(R.string.send_message_button_label))
+                                }
+                                // Stop and Clear buttons might need adjustment based on new model's streaming/cancellation capabilities
+                            }
+                            Row( // Keep Stop and Clear history buttons if needed
+                                horizontalArrangement = Arrangement.End,
+                                modifier = Modifier.fillMaxWidth(1.0f).padding(top = 4.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        job?.cancel() // This job is from the old system, ensure it's still relevant or adapt
+                                        isInGeneration.value = false // Manually reset if job cancellation handles it
+                                    },
+                                    enabled = currentIsInGeneration
+                                ) {
+                                    Text(getString(R.string.stop_generation_button_label))
+                                }
+                                Button(
+                                    onClick = {
+                                        conversationHistoryJSONString = null // This needs re-evaluation
+                                        this@MainActivity.chatMessageHistory.value = listOf()
+                                        imageUri = null // Clear selected image as well
+                                    },
+                                    enabled = !currentIsInGeneration && (conversationHistoryJSONString != null || currentChatMessageHistory.isNotEmpty() || imageUri != null)
+                                ) {
+                                    Text(getString(R.string.clean_history_button_label))
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .padding(innerPadding)
+                    .fillMaxSize()
+            ) {
+                when {
+                    modelInstance == null -> {
+                        // Model loading is handled in topBar
+                    }
+                    story != null -> {
+                        StoryDisplay(story = story!!)
+                    }
+                    else -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Text(
+                                "Enter a story prompt below to generate a creative story",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Load the bundled model from assets.
+     */
+    private fun loadBundledModel(onError: (Throwable) -> Unit, onStatusChange: (String) -> Unit) {
+        lifecycleScope.launch {
+            try {
+                onStatusChange("Copying model from assets...")
+                val modelFile = copyAssetToCache(BUNDLED_MODEL_ASSET_NAME, "cached_model.leap")
+                if (modelFile == null) {
+                    throw LeapModelLoadingException("Failed to copy model from assets.")
+                }
+                onStatusChange("Loading model: ${modelFile.path}")
+                // Ensure Leap.loadModel is the correct API for your bundled model
+                val loadedModel = Leap.loadModel(modelFile.path)
+                model.value = loadedModel
+                storyGenerationService = StoryGenerationService(loadedModel, xmlParser)
+                onStatusChange("Model loaded successfully.")
+            } catch (e: Exception) { // Catch generic Exception as Leap.loadModel might throw various things
+                Log.e(TAG, "Error loading bundled model", e)
+                onError(e)
+            }
+        }
+    }
+
+    /**
+     * Generate a story from the given prompt.
+     */
+    private fun generateStory(prompt: String) {
+        val currentModel = model.value
+        if (currentModel == null) {
+            Log.e(TAG, "Model not loaded")
+            return
+        }
+
+        isGeneratingStory.value = true
+        job = lifecycleScope.launch {
+            try {
+                val result = storyGenerationService.generateCompleteStory(prompt)
+                when (result) {
+                    is StoryGenerationResult.Success -> {
+                        currentStory.value = result.story
+                        Log.d(TAG, "Story generated successfully")
+                    }
+                    is StoryGenerationResult.Error -> {
+                        Log.e(TAG, "Story generation failed: ${result.message}")
+                        // TODO: Show error to user
+                    }
+                    is StoryGenerationResult.Loading -> {
+                        // This shouldn't happen in the final result
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error generating story", e)
+                // TODO: Show error to user
+            } finally {
+                isGeneratingStory.value = false
+            }
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+}
+
+/**
+ * The screen to show when the app is loading the model.
+ * Adapted for the new ai.liquid.leap.Model type.
+ */
+@Composable
+fun ModelLoadingIndicator(
+    modelState: ai.liquid.leap.Model?, // Changed type
+    loadModelAction: (onError: (e: Throwable) -> Unit, onStatusChange: (String) -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    var modelLoadingStatusText by remember { mutableStateOf(context.getString(R.string.loading_model_content)) }
+    LaunchedEffect(modelState) {
+        if (modelState == null) {
+            loadModelAction({ error ->
+                modelLoadingStatusText =
+                    context.getString(R.string.loading_model_fail_content, error.message ?: "Unknown error")
+            }, { status ->
+                modelLoadingStatusText = status
+            })
+        }
+    }
+    Box(Modifier
+        .padding(4.dp)
+        .fillMaxSize(1.0f), contentAlignment = Alignment.Center) {
+        Text(modelLoadingStatusText, style = MaterialTheme.typography.titleSmall)
+    }
+}
